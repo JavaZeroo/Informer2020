@@ -1,3 +1,4 @@
+# %%
 class dotdict(dict):
     """dot.notation access to dictionary attributes"""
     __getattr__ = dict.get
@@ -15,6 +16,9 @@ from models.decoder import Decoder, DecoderLayer
 from models.attn import FullAttention, ProbAttention, AttentionLayer
 from models.embed import DataEmbedding
 from rich import print
+import joblib
+
+
 class Informer(nn.Module):
     def __init__(self, enc_in, dec_in, c_out, 
                 factor=5, d_model=512, n_heads=8, e_layers=3, d_layers=2, d_ff=512, 
@@ -68,7 +72,7 @@ class Informer(nn.Module):
             norm_layer=torch.nn.LayerNorm(d_model)
         )
         self.projection = nn.Linear(d_model, c_out, bias=True)
-        self.finalact = nn.Softmax(dim=-1)
+        # self.finalact = nn.Softmax(dim=-1)
 
     def forward(self, x_enc, x_dec, 
                 enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
@@ -78,7 +82,7 @@ class Informer(nn.Module):
         dec_out = self.dec_embedding(x_dec)
         dec_out = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask)
         dec_out = self.projection(dec_out)
-        dec_out = self.finalact(dec_out)
+        # dec_out = self.finalact(dec_out)
         if self.output_attention:
             return dec_out, attns  # 返回整个dec_out和注意力权重（如果需要）
         else:
@@ -89,72 +93,53 @@ args.model = 'informer' # model of experiment, options: [informer, informerstack
 args.freq = 'h' # freq for time features encoding, options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], you can also use more detailed freq like 15min or 3h
 args.checkpoints = './informer_checkpoints' # location of model checkpoints
 args.factor = 5 # probsparse attn factor
-args.e_layers = 3 # num of encoder layers
-args.d_layers = 2 # num of decoder layers
+args.e_layers = 4 # num of encoder layers
+args.d_layers = 4 # num of decoder layers
 args.dropout = 0.01 # dropout
 args.attn = 'prob' # attention used in encoder, options:[prob, full]
-args.embed = 'fixed' # time features encoding, options:[timeF, fixed, learned]
+args.embed = 'learned' # time features encoding, options:[timeF, fixed, learned]
 args.activation = 'gelu' # activation
-args.distil = False # whether to use distilling in encoder
+args.distil = True # whether to use distilling in encoder
 args.output_attention = False # whether to output attention in ecoder
 args.mix = True
 args.padding = -1
 args.freq = 'h'
 
-ts_length = 1440
+ts_length = 2880
+max_batch = 4
 
-enc_in = 12
+enc_in = 10
 dec_in = enc_in
 c_out = 2
 n_heads = 8
-d_model = 64
-d_ff = 64
-# model = Informer(
-#     enc_in,
-#     dec_in, 
-#     c_out, 
-#     args.factor,
-#     d_model, 
-#     n_heads, 
-#     args.e_layers,
-#     args.d_layers, 
-#     d_ff,
-#     args.dropout, 
-#     args.attn,
-#     args.embed,
-#     args.freq,
-#     args.activation,
-#     args.output_attention,
-#     args.distil,
-#     args.mix,
-#     'cuda'
-# ).float()
-
-
-from models.itrans import myTran
-from easydict import EasyDict as edict
-configs = edict()
-configs.task_name = 'anomaly_detection'
-configs.seq_len = ts_length
-configs.pred_len = ts_length
-configs.output_attention = False
-configs.e_layers = 64
-configs.d_model = 256
-configs.d_ff = 256
-configs.embed = 'fixed'
-configs.freq = 'h'
-configs.dropout = 0.0
-configs.factor = 7
-configs.n_heads = 8
-configs.activation = 'gelu'
-model = myTran(configs, c_in=enc_in).float()
-
+d_model = 256
+d_ff = 256
+model = Informer(
+    enc_in,
+    dec_in, 
+    c_out, 
+    args.factor,
+    d_model, 
+    n_heads, 
+    args.e_layers,
+    args.d_layers, 
+    d_ff,
+    args.dropout, 
+    args.attn,
+    args.embed,
+    args.freq,
+    args.activation,
+    args.output_attention,
+    args.distil,
+    args.mix,
+    'cuda'
+).float()
 model_name = f'{d_model}d_modelx{d_ff}d_ffx{n_heads}heads_{args.e_layers}enc_layers_{args.d_layers}dec_layers'
 print(f"Total parm of Model: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6}M")
 # torch.Size([1, 96, 7]) torch.Size([1, 96, 4]) torch.Size([1, 72, 7]) torch.Size([1, 72, 4])
 # print(batch_x.shape, batch_x_mark.shape, dec_inp.shape, batch_y_mark.shape)
 
-print(model(torch.rand(1, ts_length, enc_in)).shape)
+print(model(torch.rand(1, ts_length, enc_in), torch.rand(1, ts_length, enc_in)).shape)
 
 
 from pathlib import Path
@@ -246,12 +231,44 @@ def normalize(y):
     y[:,1] = (y[:,1]-mean)/(std+1e-16)
     return y
 
+# %%
+
+import numpy as np 
+def random_split_tensor(tensor, random_new_length, max_length=2880, min_length=None):
+    """
+    Fixed version of the function to split a 2D tensor along the first dimension into sub-tensors of lengths 
+    not exceeding max_length and not less than min_length. Averages the lengths of the last two sub-tensors if possible.
+    
+    Parameters:
+    - tensor (torch.Tensor): The input tensor of shape (length, 12).
+    - max_length (int): The maximum length for each sub-tensor.
+    - min_length (int): The minimum length for each sub-tensor.
+    
+    Returns:
+    - List[torch.Tensor]: A list of sub-tensors.
+    """
+    min_length = int(max_length / 1.2) if min_length is None else min_length
+    try:
+        # Get the total length of the tensor
+        length = tensor.shape[0]
+        if length <= max_length:
+            return []
+        batch_size = length // random_new_length
+        # print(length - batch_size * random_new_length)
+        tensor = tensor[:batch_size * random_new_length]
+        batch_tensor = tensor.reshape(batch_size, random_new_length, -1)
+    except Exception as e:
+        print(tensor.shape)
+        raise e
+    return batch_tensor
+
+
 class SleepDataset(torch.utils.data.Dataset):
     def __init__(
         self,
-        train_arr
+        file
     ):
-        self.data = train_arr
+        self.targets,self.data,self.ids = joblib.load(file)
             
     def downsample_seq_generate_features(self,feat, downsample_factor = SAMPLE_FREQ):
         # downsample data and generate features
@@ -293,25 +310,40 @@ class SleepDataset(torch.utils.data.Dataset):
                 start_index = int(torch.rand(1) * (len(temp_y)-ts_length))
                 temp_x = temp_x[start_index:]
                 temp_y = temp_y[start_index:]
-            temp_x = temp_x[:ts_length * 10]
-            temp_y = temp_y[:ts_length * 10]
+            # temp_x = temp_x[:ts_length * 10]
+            # temp_y = temp_y[:ts_length * 10]
+            # new_length = temp_x.shape[0]
+            # temp_x = temp_x.reshape(-1, ts_length, temp_x.shape[-1])
         else:
             if torch.rand(1) < 0.2:
                 start_index = int(torch.rand(1) * (len(temp_y)-ts_length))
                 temp_x = temp_x[start_index:]
                 temp_y = temp_y[start_index:]
-        temp_x = temp_x.unsqueeze(0)
-        temp_y = temp_y.unsqueeze(0)
+        min_length = int(ts_length / 1.2)
+        max_length = ts_length
+        random_new_length = np.random.randint(min_length, max_length)
+        temp_x = random_split_tensor(temp_x, random_new_length, ts_length, min_length)
+        temp_y = random_split_tensor(temp_y, random_new_length, ts_length, min_length)
+        
+        if temp_x.shape[0] > max_batch:
+            # random select max_batch batch
+            indices = torch.randperm(temp_x.size(0))[:max_batch]
+            temp_x = torch.index_select(temp_x, 0, indices)
+            temp_y = torch.index_select(temp_y, 0, indices)
+
+                
+        # temp_x = temp_x.unsqueeze(0)
+        # temp_y = temp_y.unsqueeze(0)
             
         return temp_x, temp_y
     
     
     def __len__(self):
-        return len(self.targets)
+        return len(self.data)
 
     def __getitem__(self, index):
-        X, y = self.data[index].x, self.data[index].y
-        
+        X = self.data[index][['anglez','enmo']]
+        y = self.targets[index]
         
         # turn target inds into array
         target_guassian = np.zeros((len(X),2))
@@ -330,33 +362,7 @@ class SleepDataset(torch.utils.data.Dataset):
         y = normalize(torch.from_numpy(y))
         X = torch.from_numpy(X)
         return self.aug(X, y)
-def random_split_tensor(tensor, random_new_length, max_length=2880, min_length=None):
-    """
-    Fixed version of the function to split a 2D tensor along the first dimension into sub-tensors of lengths 
-    not exceeding max_length and not less than min_length. Averages the lengths of the last two sub-tensors if possible.
-    
-    Parameters:
-    - tensor (torch.Tensor): The input tensor of shape (length, 12).
-    - max_length (int): The maximum length for each sub-tensor.
-    - min_length (int): The minimum length for each sub-tensor.
-    
-    Returns:
-    - List[torch.Tensor]: A list of sub-tensors.
-    """
-    min_length = int(max_length / 1.2) if min_length is None else min_length
-    try:
-        # Get the total length of the tensor
-        length = tensor.shape[0]
-        if length <= max_length:
-            return []
-        batch_size = length // random_new_length
-        # print(length - batch_size * random_new_length)
-        tensor = tensor[:batch_size * random_new_length]
-        batch_tensor = tensor.reshape(batch_size, random_new_length, -1)
-    except Exception as e:
-        print(tensor.shape)
-        raise e
-    return batch_tensor
+
 class newMyDataset(torch.utils.data.Dataset):
     def __init__(self, train_arr):
         self.train_arr = train_arr
@@ -392,43 +398,8 @@ class newMyDataset(torch.utils.data.Dataset):
                 start_index = int(torch.rand(1) * (len(temp_y)-ts_length))
                 temp_x = temp_x[start_index:]
                 temp_y = temp_y[start_index:]
-        random_new_length = ts_length
-        temp_x = random_split_tensor(temp_x, random_new_length, ts_length, ts_length)
-        temp_y = random_split_tensor(temp_y, random_new_length, ts_length, ts_length)
-        # temp_x = temp_x.unsqueeze(0)
-        # temp_y = temp_y.unsqueeze(0)
-        #     if torch.rand(1) < 0.2:
-        #         start_index = int(torch.rand(1) * (len(temp_y)-ts_length))
-        #         temp_x = temp_x[start_index:]
-        #         temp_y = temp_y[start_index:]
-        #     d = int(len(temp_x) / ts_length)
-        #     # print(ts_length*int(len(temp_x) / ts_length))
-        #     try:
-        #         temp_x = temp_x[:ts_length*d].reshape(-1, ts_length, 12)
-        #         temp_y = temp_y[:ts_length*d].reshape(-1, ts_length, 2)
-        #         max_batch = 20
-        #         if d > max_batch:
-        #             # random sample max_batch data
-        #             radnom_index = random.sample(range(d), max_batch)
-        #             # print(radnom_index)
-        #             temp_x = temp_x[radnom_index]
-        #             temp_y = temp_y[radnom_index]
-        #             # print(temp_x.shape)
-        #     except Exception as e:
-        #         print(e)
-        #         print(temp_x.shape)
-        #         print(temp_y.shape)
-        #         # print(d)
-        #         # print(ts_length*d)
-        #         # print(len(temp_x))
-        #         # print(len(temp_y))
-        #         # print(ts_length*d - len(temp_x))
-        #         # print(ts_length*d - len(temp_y))
-        #         # print(ts_length*d - len(temp_x) == ts_length*d - len(temp_y))
-        #         raise e
-        # else:
-        # temp_x = temp_x.unsqueeze(0)
-        # temp_y = temp_y.unsqueeze(0)
+        temp_x = temp_x.unsqueeze(0)
+        temp_y = temp_y.unsqueeze(0)
             
         return temp_x, temp_y
         
@@ -440,15 +411,17 @@ class newMyDataset(torch.utils.data.Dataset):
 
 # print(x_val.shape)
 # print(y_val.shape)
-ds = newMyDataset(train_arr)
+ds = SleepDataset("/home/ljb/train_data.pkl")
+# ds = SleepDataset(train_arr)
 dl = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=True, num_workers=24)
-ds_val = newMyDataset(val_arr)
-dl_val = torch.utils.data.DataLoader(ds_val, batch_size=1, shuffle=True, num_workers=24)
+# ds_val = newMyDataset(val_arr)
+# dl_val = torch.utils.data.DataLoader(ds_val, batch_size=1, shuffle=True, num_workers=24)
 for x,y in ds:
     print(x.shape, y.shape)
+    plt.plot(y[0,:3000,0].numpy())
     break
 
-
+# %%
 def draw_one_batch(x, y, y_pred, title=None):
     x, y, y_pred = x.detach().cpu().numpy(), y.detach().cpu().numpy(), y_pred.detach().cpu().numpy()
     # y_pred = F.softmax(torch.from_numpy(y_pred), dim=-1).numpy()
@@ -557,27 +530,13 @@ def train_one_epoch(dl, model, loss_fn, optimizer, e, scheduler=None):
         if len(x.shape) == 4:
             x = x[0]
             y = y[0]
-        # print(x.shape, y.shape)
-        # try:
-        #     for x, y in zip(split_tensor(x), split_tensor(y)):
-        #         x = x.float().cuda()
-        #         y = y.float().cuda()
-        #         print(x.shape)
-                
-        #         optimizer.zero_grad()
-        #         y_pred = model(x, x)
-        #         loss = loss_fn(y_pred, y)
-        #         loss.backward()
-        #         train_loss.append(loss.item())
-        #         optimizer.step()
-        # except Exception as e:
-        #     print(x.shape, y.shape)
-        #     raise e
         try:
             x = x.float().cuda()
             y = y.float().cuda()
             optimizer.zero_grad()
-            y_pred = model(x)
+            
+            y_pred = model(x, x)
+            
             # y_pred = torch.zeros(y.shape).to('cuda', non_blocking=True)
             # seq_len = x.shape[1]
             # for i in range(0, seq_len, ts_length):
@@ -591,10 +550,11 @@ def train_one_epoch(dl, model, loss_fn, optimizer, e, scheduler=None):
             #         raise e
             #     y_pred[:, i : i + ts_length] = pred
             #     del X_chunk,pred
+                
             loss = loss_fn(y_pred, y)
             loss.backward()
             train_loss.append(loss.item())
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-1)
+            # nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-1)
             optimizer.step()
             torch.cuda.empty_cache()
         except Exception as e:
@@ -621,7 +581,19 @@ def val_one_epoch(dl, model):
                 y = y[0]
             x = x.float().cuda()
             y = y.float().cuda()
-            y_pred = model(x)
+            seq_len = x.shape[1]
+            for i in range(0, seq_len, ts_length):
+                X_chunk = x[:, i : i + ts_length].float()
+
+                X_chunk = X_chunk.to('cuda', non_blocking=True)
+                try:
+                    pred = model(X_chunk, X_chunk)
+                except Exception as e:
+                    print(X_chunk.shape)
+                    raise e
+                y_pred[:, i : i + ts_length] = pred
+                del X_chunk,pred
+            y_pred = model(x, x)
             loss = loss_fn(y_pred, y)
             val_loss.append(loss.item())
             # for x, y in zip(split_tensor(x), split_tensor(y)):
@@ -636,15 +608,15 @@ def val_one_epoch(dl, model):
     draw_one_batch(x, y, y_pred, title=f"Val")
     torch.cuda.empty_cache()
 
-epoch = 100
+epoch = 200
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epoch, eta_min=1e-4)
-# loss_fn = torch.nn.MSELoss()
-loss_fn = torch.nn.BCELoss()
+loss_fn = torch.nn.MSELoss()
+# loss_fn = torch.nn.BCELoss()
 for i in range(1, epoch+1):
     train_one_epoch(dl, model, loss_fn, optimizer, i, scheduler)
-    if i % val_pre_epoch == 0:
-        val_one_epoch(dl_val, model)
+    # if i % val_pre_epoch == 0:
+    #     val_one_epoch(dl_val, model)
 
 def draw_one_batch_and_attn(x, y, y_pred, attn, title=None):
     x, y, y_pred, attn = x.detach().cpu().numpy(), y.detach().cpu().numpy(), y_pred.detach().cpu().numpy(), attn.detach().cpu().numpy()
@@ -687,52 +659,55 @@ def check_attention(model, dl):
     model.encoder.attn_layers[0].attention.inner_attention.output_attention = False
     return attns
 
-attn = check_attention(model, ds_val)[0]
+# attn = check_attention(model, ds_val)[0]
 
-for i in range(8):
-    print(attn[0,i].max())
-
-
-
-import cv2
+# for i in range(8):
+#     print(attn[0,i].max())
 
 
-def img_resize(image):
-    height, width = image.shape[0], image.shape[1]
-    # 设置新的图片分辨率框架
-    width_new = 120
-    height_new = 120
-    # 判断图片的长宽比率
-    if width / height >= width_new / height_new:
-        img_new = cv2.resize(image, (width_new, int(height * width_new / width)))
-    else:
-        img_new = cv2.resize(image, (int(width * height_new / height), height_new))
-    return img_new
 
-for i in range(8):
-    img = attn[0, i, :, :].cpu().detach().numpy() * 255
-    img_new = img_resize(img)
-    plt.imshow(img_new, cmap='gray')
-    plt.show()
+# import cv2
 
-import matplotlib.pyplot as plt
-import torch
 
-# 假设 attn 是你打印出来的注意力权重张量，形状为 [18, 8, 2880, 2880]
-# 为了演示，我们这里随机生成一个这样的张量
-# attn = torch.rand(18, 8, 2880, 2880)
+# def img_resize(image):
+#     height, width = image.shape[0], image.shape[1]
+#     # 设置新的图片分辨率框架
+#     width_new = 120
+#     height_new = 120
+#     # 判断图片的长宽比率
+#     if width / height >= width_new / height_new:
+#         img_new = cv2.resize(image, (width_new, int(height * width_new / width)))
+#     else:
+#         img_new = cv2.resize(image, (int(width * height_new / height), height_new))
+#     return img_new
 
-# 选择第一个批次和第一个注意力头的注意力权重
-attn_to_plot = attn[0, 2, :, :].cpu().detach().numpy()
+# for i in range(8):
+#     img = attn[0, i, :, :].cpu().detach().numpy() * 255
+#     img_new = img_resize(img)
+#     plt.imshow(img_new, cmap='gray')
+#     plt.show()
 
-# 使用 Matplotlib 进行可视化
-plt.figure(figsize=(10, 10))
-plt.imshow(attn[0,0,:, :].cpu().detach().numpy(), cmap='viridis')
-plt.colorbar()
-plt.title("Attention Weights of the First Sample and First Attention Head")
-plt.xlabel("Keys")
-plt.ylabel("Queries")
-plt.show()
+# import matplotlib.pyplot as plt
+# import torch
+
+# # 假设 attn 是你打印出来的注意力权重张量，形状为 [18, 8, 2880, 2880]
+# # 为了演示，我们这里随机生成一个这样的张量
+# # attn = torch.rand(18, 8, 2880, 2880)
+
+# # 选择第一个批次和第一个注意力头的注意力权重
+# attn_to_plot = attn[0, 2, :, :].cpu().detach().numpy()
+
+# # 使用 Matplotlib 进行可视化
+# plt.figure(figsize=(10, 10))
+# plt.imshow(attn[0,0,:, :].cpu().detach().numpy(), cmap='viridis')
+# plt.colorbar()
+# plt.title("Attention Weights of the First Sample and First Attention Head")
+# plt.xlabel("Keys")
+# plt.ylabel("Queries")
+# plt.show()
+
+
+# %%
 
 
 
