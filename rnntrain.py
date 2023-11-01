@@ -33,7 +33,7 @@ args.freq = 'h'
 ts_length = 1440
 max_batch = 100
 
-enc_in = 10
+enc_in = 12
 dec_in = enc_in
 c_out = 2
 n_heads = 8
@@ -114,6 +114,113 @@ def normalize(y):
     y[:,1] = (y[:,1]-mean)/(std+1e-12)
     return y
 
+def random_split_tensor(tensor, random_new_length, max_length=2880, min_length=None):
+    """
+    Fixed version of the function to split a 2D tensor along the first dimension into sub-tensors of lengths 
+    not exceeding max_length and not less than min_length. Averages the lengths of the last two sub-tensors if possible.
+    
+    Parameters:
+    - tensor (torch.Tensor): The input tensor of shape (length, 12).
+    - max_length (int): The maximum length for each sub-tensor.
+    - min_length (int): The minimum length for each sub-tensor.
+    
+    Returns:
+    - List[torch.Tensor]: A list of sub-tensors.
+    """
+    min_length = int(max_length / 1.2) if min_length is None else min_length
+    try:
+        # Get the total length of the tensor
+        length = tensor.shape[0]
+        if length <= max_length:
+            return []
+        batch_size = length // random_new_length
+        # print(length - batch_size * random_new_length)
+        tensor = tensor[:batch_size * random_new_length]
+        batch_tensor = tensor.reshape(batch_size, random_new_length, -1)
+    except Exception as e:
+        print(tensor.shape)
+        raise e
+    return batch_tensor
+
+
+class newMyDataset(torch.utils.data.Dataset):
+    def __init__(self, train_arr):
+        self.train_arr = train_arr
+        self.len = len(train_arr)
+        # self.featss = train_arr[0].x.shape[-1]
+
+    def aug(self,ts):
+        temp_x = ts.x
+        temp_y = ts.y
+        
+        if torch.rand(1) < 0.2:
+            temp_x = torch.flip(temp_x, dims=[0])
+            temp_y = torch.flip(temp_y, dims=[0])
+        
+        if temp_x.shape[0] % 2 != 0:
+            temp_x = temp_x[:-1]
+            temp_y = temp_y[:-1]
+
+        if temp_x.shape[0] >= ts_length * max_batch:
+            if torch.rand(1) < 0.5:
+                start_index = int(torch.rand(1) * (len(temp_y)-ts_length))
+                temp_x = temp_x[start_index:]
+                temp_y = temp_y[start_index:]
+            temp_x = temp_x[:ts_length * max_batch]
+            temp_y = temp_y[:ts_length * max_batch]
+        else:
+            if torch.rand(1) < 0.2:
+                start_index = int(torch.rand(1) * (len(temp_y)-ts_length))
+                temp_x = temp_x[start_index:]
+                temp_y = temp_y[start_index:]
+        # random_new_length = ts_length
+        # temp_x = random_split_tensor(temp_x, random_new_length, ts_length, ts_length)
+        # temp_y = random_split_tensor(temp_y, random_new_length, ts_length, ts_length)
+        # temp_x = temp_x.unsqueeze(0)
+        # temp_y = temp_y.unsqueeze(0)
+        #     if torch.rand(1) < 0.2:
+        #         start_index = int(torch.rand(1) * (len(temp_y)-ts_length))
+        #         temp_x = temp_x[start_index:]
+        #         temp_y = temp_y[start_index:]
+        #     d = int(len(temp_x) / ts_length)
+        #     # print(ts_length*int(len(temp_x) / ts_length))
+        #     try:
+        #         temp_x = temp_x[:ts_length*d].reshape(-1, ts_length, 12)
+        #         temp_y = temp_y[:ts_length*d].reshape(-1, ts_length, 2)
+        #         max_batch = 20
+        #         if d > max_batch:
+        #             # random sample max_batch data
+        #             radnom_index = random.sample(range(d), max_batch)
+        #             # print(radnom_index)
+        #             temp_x = temp_x[radnom_index]
+        #             temp_y = temp_y[radnom_index]
+        #             # print(temp_x.shape)
+        #     except Exception as e:
+        #         print(e)
+        #         print(temp_x.shape)
+        #         print(temp_y.shape)
+        #         # print(d)
+        #         # print(ts_length*d)
+        #         # print(len(temp_x))
+        #         # print(len(temp_y))
+        #         # print(ts_length*d - len(temp_x))
+        #         # print(ts_length*d - len(temp_y))
+        #         # print(ts_length*d - len(temp_x) == ts_length*d - len(temp_y))
+        #         raise e
+        # else:
+        temp_x = temp_x.unsqueeze(0)
+        temp_y = temp_y.unsqueeze(0)
+            
+        return temp_x, temp_y
+        
+    def __getitem__(self, index):
+        return self.aug(self.train_arr[index])
+    
+    def __len__(self):
+        return self.len
+
+
+
 class SleepDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -171,13 +278,22 @@ class SleepDataset(torch.utils.data.Dataset):
         X = torch.from_numpy(X)
         return X.unsqueeze(0), y.unsqueeze(0)
 
-processed_ds = 'processed_ds.pkl'
+processed_ds = None
+# processed_ds = 'processed_ds.pkl'
 if processed_ds is None:
-    ds = SleepDataset("/home/ljb/train_data.pkl")
-    # processed_ds = [ds[0], ds[1]]
-    # ds = [ds[0], ds[1]]
-    # ds = SleepDataset(train_arr)
+
+    # print(x_val.shape)
+    # print(y_val.shape)
+    ds = newMyDataset(train_arr)
     dl = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=True, num_workers=24)
+    ds_val = newMyDataset(val_arr)
+    dl_val = torch.utils.data.DataLoader(ds_val, batch_size=1, shuffle=True, num_workers=24)
+    
+    # ds = SleepDataset("/home/ljb/train_data.pkl")
+    # # processed_ds = [ds[0], ds[1]]
+    # # ds = [ds[0], ds[1]]
+    # # ds = SleepDataset(train_arr)
+    # dl = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=True, num_workers=24)
 
     # model.load_state_dict(torch.load('256d_modelx256d_ffx8heads_4enc_layers_4dec_layers/model_4000.pth'))
     processed_ds = [(x, y) for x, y in tqdm(ds) if y.max() > 0]
@@ -186,6 +302,7 @@ if processed_ds is None:
 else:
     processed_ds = pickle.load(open(processed_ds, 'rb'))
 
+print(processed_ds[0][0].shape)
 Path(model_name).mkdir(exist_ok=True)
 
 val_pre_epoch = 1
@@ -203,25 +320,26 @@ def train_one_epoch(dl, model, loss_fn, optimizer, e, scheduler=None):
             x = x[0]
             y = y[0]
         # try:
-        # hidden = model.init_hidden(1)
-        hidden = None
+        hidden = model.init_hidden(1)
+        # hidden = None
         x = x.float().permute(1, 0, 2).cuda()
         y = y.float().permute(1, 0, 2).cuda()
-        y_pred = torch.zeros_like(y).to('cuda', non_blocking=True)
+        # y_pred = torch.zeros_like(y).to('cuda', non_blocking=True)
         for i in range(max(x.shape[0] // max_length, 1)):
-            # hidden = model.repackage_hidden(hidden)
+            hidden = model.repackage_hidden(hidden)
             # hidden_ = model.repackage_hidden(hidden)
             x_ = x[i*max_length:(i+1)*max_length]
-            # y_ = y[i*max_length:(i+1)*max_length]
+            y_ = y[i*max_length:(i+1)*max_length]
             outSeq2, hidden = model.forward(x_, hidden)
-            y_pred[i*max_length:(i+1)*max_length] = outSeq2
+            # y_pred[i*max_length:(i+1)*max_length] = outSeq2
             
-        loss = loss_fn(normalize(y_pred[:,0]).unsqueeze(1).float(), y.float())
-        loss.backward()
-        train_loss.append(loss.item())
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1e-1)
-        optimizer.step()
-            # torch.cuda.empty_cache()
+        # loss = loss_fn(normalize(y_pred[:,0]).unsqueeze(1).float(), y.float())
+            loss = loss_fn(outSeq2, y_)
+            loss.backward()
+            train_loss.append(loss.item())
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1e-1)
+            optimizer.step()
+            torch.cuda.empty_cache()
         # except Exception as e:
         #     print(x.shape, y.shape)
         #     raise e
@@ -243,8 +361,8 @@ scheduler = None
 # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epoch, eta_min=1e-4)
 
 # scheduler = CosineLRScheduler(optimizer, 1e-3, 1e-4, epoch, len(processed_ds) // max_length)
-loss_fn = torch.nn.MSELoss()
-# loss_fn = torch.nn.BCELoss()
+# loss_fn = torch.nn.MSELoss()
+loss_fn = torch.nn.BCELoss()
 print("Start training...")
 for i in range(1, epoch+1):
     train_one_epoch(processed_ds, model, loss_fn, optimizer, i, scheduler)

@@ -32,6 +32,7 @@ class RNNPredictor(nn.Module):
         self.rnn_type = rnn_type
         self.rnn_hid_size = rnn_hid_size
         self.nlayers = nlayers
+        self.sigmod = nn.Sigmoid()
         # self.layerNorm1=nn.LayerNorm(normalized_shape=rnn_inp_size)
         # self.layerNorm2=nn.LayerNorm(normalized_shape=rnn_hid_size)
 
@@ -62,6 +63,7 @@ class RNNPredictor(nn.Module):
         decoded = decoded.view(output.size(0), output.size(1), decoded.size(1)) # [ seq_len * batch_size * feature_size]
         if self.res_connection:
             decoded = decoded + input
+        decoded = self.sigmod(decoded)
         if return_hiddens:
             return decoded,hidden,output
 

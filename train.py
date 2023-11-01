@@ -363,11 +363,6 @@ class newMyDataset(torch.utils.data.Dataset):
         self.len = len(train_arr)
         # self.featss = train_arr[0].x.shape[-1]
 
-    def gauss(self,n=SIGMA,sigma=SIGMA*0.15):
-        # guassian distribution function
-        r = range(-int(n/2),int(n/2)+1)
-        return [1 / (sigma * sqrt(2*pi)) * exp(-float(x)**2/(2*sigma**2)) for x in r]
-
     def aug(self,ts):
         temp_x = ts.x
         temp_y = ts.y
